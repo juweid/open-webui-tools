@@ -2,8 +2,8 @@
 title: Job Search & Nearby Cities
 description: Search for job listings using Exa and find cities near a target location using Nominatim geocoding and geonamescache.
 author: jweid
-version: 0.1.0
-requirements: geonamescache, geopy, exa-py
+version: 0.2.0
+requirements: geonamescache, geopy, exa-py==2.26.0
 """
 
 import asyncio
