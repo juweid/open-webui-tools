@@ -9,7 +9,7 @@ requirements: geonamescache, geopy, exa-py
 import asyncio
 import json
 import math
-from typing import Any, Awaitable, Callable, Dict, Optional
+from typing import Any, Awaitable, Callable, Optional
 
 import geonamescache
 from geopy.geocoders import Nominatim
@@ -42,7 +42,7 @@ def _haversine_km(lat1: float, lon1: float, lat2: float, lon2: float) -> float:
         math.sin(dphi / 2) ** 2
         + math.cos(phi1) * math.cos(phi2) * math.sin(dlambda / 2) ** 2
     )
-    return 2 * EARTH_RADIUS_KM * math.asin(math.sqrt(a))
+    return 2 * EARTH_RADIUS_KM * math.asin(min(1.0, math.sqrt(a)))
 
 
 class Tools:
@@ -149,7 +149,7 @@ class Tools:
     ) -> str:
         """Find cities near a given city, sorted by distance (closest first).
 
-        Returns a JSON list of {name, distance_km, population}. The target city itself
+        Returns a JSON list of {name, distance_km, population, country_code}. The target city itself
         is usually included at ~0 km. An empty list means nothing matched: retry with a
         larger radius_km or a lower min_population. A plain-text message means the city
         could not be found: retry with a more specific name (add region or country).
@@ -192,10 +192,19 @@ class Tools:
         )
         cities = await asyncio.to_thread(self._get_cities)
 
+        # Precompute bounding-box deltas to eliminate distant cities rapidly
+        max_dlat = radius_km / 111.0
+        cos_lat = math.cos(math.radians(lat))
+        max_dlng = radius_km / (111.0 * max(abs(cos_lat), 0.01))
+
         nearby = []
         for place in cities.values():
             population = place.get("population", 0)
             if population < min_population:
+                continue
+            if abs(place["latitude"] - lat) > max_dlat:
+                continue
+            if abs(place["longitude"] - lng) > max_dlng:
                 continue
             distance = _haversine_km(lat, lng, place["latitude"], place["longitude"])
             if distance <= radius_km:
@@ -209,6 +218,7 @@ class Tools:
                 "name": place.get("name"),
                 "distance_km": round(distance, 2),
                 "population": place.get("population", 0),
+                "country_code": place.get("countrycode"),
             }
             for distance, place in nearby[:count]
         ]
@@ -221,9 +231,9 @@ class Tools:
         query: str,
         exclude_urls: Optional[list[str]] = None,
         __event_emitter__: Optional[Callable[[dict], Awaitable[None]]] = None,
-        __model__: Dict[str, Any] = None,
-        __request__: Request = None,
-        __user__: Dict[str, Any] = None,
+        __model__: Optional[dict[str, Any]] = None,
+        __request__: Optional[Request] = None,
+        __user__: Optional[dict[str, Any]] = None,
     ) -> str:
         """Search the web for current job listings and get a summary of each one.
 
@@ -268,8 +278,6 @@ class Tools:
         :return: JSON list of job listings, or an error message.
         """
 
-
-        
         async def emit_status(description: str, done: bool = False):
             """Emit a status event to the Open WebUI client if an event emitter is configured."""
             if __event_emitter__:
@@ -281,9 +289,9 @@ class Tools:
                     }
                 )
         
-        task_model_id = __model__.get("id")
-        if not task_model_id:
-            return "Error: Could not resolve background Task Model ID."
+        if not __model__ or not __model__.get("id"):
+            return json.dumps({"error": "Could not resolve background Task Model ID."})
+        task_model_id = __model__["id"]
         
         if not self.valves.exa_api_key:
             return json.dumps({"error": "Exa API key is not set."})
@@ -308,56 +316,90 @@ class Tools:
         }
         num_results = 10
         
-        response = await asyncio.to_thread(
-            exa.search,
-            query=query,
-            include_domains=include_domains,
-            exclude_domains=exclude_domains,
-            type=type,
-            contents=contents,
-            num_results=num_results
+        try:
+            response = await asyncio.to_thread(
+                exa.search,
+                query=query,
+                include_domains=include_domains,
+                exclude_domains=exclude_domains,
+                type=type,
+                contents=contents,
+                num_results=num_results
+            )
+        except Exception as e:
+            await emit_status(f"Exa search failed: {e}", done=True)
+            return json.dumps({"error": f"Exa search failed: {str(e)}"})
+        
+        exclude_set = set(exclude_urls or [])
+        valid_results = [r for r in response.results if r.url not in exclude_set]
+
+        await emit_status(f"Processing {len(valid_results)} job search results concurrently...")
+        
+        system_content = (
+            "You are an expert job listing parser. Analyze the provided webpage text.\n\n"
+            "1. If the text is NOT a single specific job listing (e.g. aggregate search result page, "
+            "directory, overview, blog post, or invalid page), return ONLY the exact text: 'Not a Job Listing'.\n\n"
+            "2. If it IS a single job listing, extract the information and return ONLY a valid JSON object matching this schema:\n"
+            "{\n"
+            '  "company": "Company name or Unknown",\n'
+            '  "role": "Exact job title",\n'
+            '  "location": "City, Country (include remote/hybrid status; if remote/anywhere add requested location)",\n'
+            '  "work_model": "On-site | Hybrid | Remote | Unknown",\n'
+            '  "key_skills": ["Skill 1", "Skill 2"],\n'
+            '  "summary": "1-2 sentence concise summary of the role"\n'
+            "}"
         )
-        
-        await emit_status(f"Processing {len(response.results)} job search results...")
-        
-        processed_results = []
-        for i, result in enumerate(response.results):
-            await emit_status(f"Processing job listing {i+1}/{len(response.results)}: {result.title}...")
-            body = {
-                "model": task_model_id,
-                "messages": [
-                    {
-                        "role": "system", 
-                        "content": "Extract relevant information from the job listing text." +
-                        "Return only 'Not a Job Listing' if the text does not appear to be a SINGLE job listing." + 
-                        "The page has to be a single job listing! Always include the name of the location," + 
-                        "if it says 'remote' or 'home office' or 'nationwide' or 'anywhere' add the requested location name."
-                    },
-                    {"role": "user", "content": f"Potential Job listing: {result.text}"},
-                ],
-                "stream": False,
-            }
-        
-            try:
-                task_response = await generate_chat_completion(__request__, body, user_object)
-                
-                if isinstance(task_response, dict) and "choices" in task_response:
-                    if len(task_response["choices"]) > 0:
-                        processed_text = task_response["choices"][0]["message"]["content"]
+
+        semaphore = asyncio.Semaphore(5)
+        status_lock = asyncio.Lock()
+        completed_count = 0
+        total_results = len(valid_results)
+
+        async def process_listing(result: Any) -> dict[str, Any]:
+            nonlocal completed_count
+            async with semaphore:
+                raw_text = (result.text or "")[:12000]
+                body = {
+                    "model": task_model_id,
+                    "messages": [
+                        {
+                            "role": "system",
+                            "content": system_content,
+                        },
+                        {"role": "user", "content": f"Potential Job listing: {raw_text}"},
+                    ],
+                    "stream": False,
+                }
+
+                try:
+                    task_response = await generate_chat_completion(__request__, body, user_object)
+
+                    if isinstance(task_response, dict) and "choices" in task_response:
+                        if len(task_response["choices"]) > 0:
+                            processed_text = task_response["choices"][0]["message"]["content"]
+                        else:
+                            processed_text = "Error: Model returned an empty choices list."
                     else:
-                        processed_text = "Error: Model returned an empty choices list."
-                else:
-                    processed_text = "Error: Unexpected response format from the model."
-            except Exception as e:
-                processed_text = f"Task Model execution failed. Error: {str(e)}"
-            
-            processed_results.append({
-                "title": result.title,
-                "url": result.url,
-                "job_listing_text": processed_text,
-            })
-            
+                        processed_text = "Error: Unexpected response format from the model."
+                except Exception as e:
+                    processed_text = f"Task Model execution failed. Error: {str(e)}"
+
+                async with status_lock:
+                    completed_count += 1
+                    title_preview = (result.title or "Listing").strip()[:35]
+                    await emit_status(
+                        f"Processed {completed_count}/{total_results} listings ({title_preview}...)"
+                    )
+
+                return {
+                    "title": result.title,
+                    "url": result.url,
+                    "job_listing_text": processed_text,
+                }
+
+        tasks = [process_listing(r) for r in valid_results]
+        processed_results = await asyncio.gather(*tasks)
+
         await emit_status(f"Found {len(processed_results)} job results.", done=True)
 
         return json.dumps(processed_results, ensure_ascii=False)
-    

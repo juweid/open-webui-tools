@@ -62,6 +62,7 @@ async def run_example(mock_generate, mock_get_user):
     tool.valves.nominatim_user_agent = "job_search_tool_test"
     tool.valves.dataset_min_population = 15000
     tool.valves.exa_api_key = os.getenv("EXA_API_KEY")
+    tool.valves.job_sites = ["devjobs.de", "stepstone.de"]
     
     # -----------------------------------------------
     # Test get_cities_nearby from job_search_tool.py
