@@ -3806,6 +3806,7 @@ dependencies = [
     { name = "geopy" },
     { name = "open-webui" },
     { name = "openai" },
+    { name = "tiktoken" },
 ]
 
 [package.metadata]
@@ -3816,6 +3817,7 @@ requires-dist = [
     { name = "geopy", specifier = ">=2.5.0" },
     { name = "open-webui", specifier = ">=0.11.4" },
     { name = "openai", specifier = ">=2.29.0" },
+    { name = "tiktoken", specifier = ">=0.13.0" },
 ]
 
 [[package]]
