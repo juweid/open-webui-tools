@@ -7,37 +7,38 @@ requirements: exa-py==2.26.0
 """
 
 import asyncio
+import hashlib
 import json
-from typing import Any, Awaitable, Callable, Optional
-from pydantic import BaseModel, Field
 from dataclasses import asdict
+from typing import Any, Awaitable, Callable, Optional
 
 from exa_py import Exa
 from exa_py.api import DYNAMIC_HIGHLIGHTS_BETA
+from pydantic import BaseModel, Field
 
 from open_webui.models.users import Users
 
 
 class Tools:
-    """Open WebUI tools for searching the web.
-    """
+    """Open WebUI tools for searching the web."""
 
     class Valves(BaseModel):
         """Admin-configurable settings for the toolkit.
+
         :ivar exa_api_key: API key for the Exa search API. ``exa_search`` returns an
             error if this is empty.
         """
+
         exa_api_key: str = Field(
             default="",
             description="API key for the Exa web search API. Required for web search functionality.",
-            json_schema_extra={"input": {"type": "password"}}
+            json_schema_extra={"input": {"type": "password"}},
         )
 
     def __init__(self):
-        """Create the toolkit with default valves 
-        """
+        """Create the toolkit with default valves."""
         self.valves = self.Valves()
-    
+
     async def exa_search(
         self,
         query: str,
@@ -82,8 +83,8 @@ class Tools:
                     annual reports. Leave unset for live prices or general financial news.
                 * ``personal site`` — Independent blogs, developer portfolios, and
                     personal write-ups without corporate SEO noise.
-                * ``github`` — Code repositories, issue trackers, and documentation
-                    for open-source projects.
+
+                (For GitHub searches, use standard search with ``include_domains=["github.com"]``).
 
                 **Constraints:** For ``company`` and ``people``, both publication date
                 filters must be unset. For ``people``, ``exclude_domains`` must also be
@@ -108,7 +109,7 @@ class Tools:
                 relevant highlights and entities for certain types of searches. On error, returns a JSON object with an ``error``
                 key and a descriptive message.
         """
-    
+
         async def emit_status(description: str, done: bool = False):
             """Emit a status event to the Open WebUI client if an event emitter is configured."""
             if __event_emitter__:
@@ -116,77 +117,99 @@ class Tools:
                     {
                         "type": "status",
                         "data": {"description": description, "done": done},
-                        "hidden": False
+                        "hidden": False,
                     }
                 )
-        
+
         if not self.valves.exa_api_key:
             return json.dumps({"error": "Exa API key is not set."})
-        
+
         if not __user__ or "id" not in __user__:
             return json.dumps({"error": "Injected user context is missing."})
-        
-        user_id = __user__["id"]
-        user_object = await Users.get_user_by_id(user_id)
-        if not user_object:
-            return json.dumps({"error": "Active user verification failed."})
-        
-        exa = Exa(api_key=self.valves.exa_api_key)
 
-        await emit_status(f"Searching with query: {query}...")
-    
-        
-        include_domains = include_domains or []
-        exclude_domains = exclude_domains if category not in ["people"] else None
-        search_type = "auto" if live_fetch else "lite" # lite can not be used with live_fetch
-        contents = {
-            "highlights": { "dynamic": True },
-        }
-        if live_fetch:
-            contents["max_age_hours"] = 0  # Force live fetch if requested
-        num_results = 5
-        category = category or None
-        start_published_date = start_published_date if category not in ["people", "company"] else None
-        end_published_date = end_published_date if category not in ["people", "company"] else None
-        
-        
         try:
+            user_id = __user__["id"]
+            user_object = await Users.get_user_by_id(user_id)
+            if not user_object:
+                return json.dumps({"error": "Active user verification failed."})
+
+            await emit_status(f"Searching with query: {query}...")
+
+            valid_categories = {
+                "company",
+                "people",
+                "publication",
+                "news",
+                "financial report",
+                "personal site",
+            }
+            category = category if category in valid_categories else None
+
+            include_domains = include_domains or None
+            exclude_domains = (
+                (exclude_domains or None) if category not in ["people"] else None
+            )
+            search_type = "auto" if live_fetch else "lite"
+            contents = {
+                "highlights": {"dynamic": True},
+            }
+            if live_fetch:
+                contents["max_age_hours"] = 0
+
+            num_results = 5
+            start_published_date = (
+                start_published_date
+                if category not in ["people", "company"]
+                else None
+            )
+            end_published_date = (
+                end_published_date if category not in ["people", "company"] else None
+            )
+
+            user_identifier = hashlib.sha256(str(user_id).encode()).hexdigest()[:64]
+            exa = Exa(api_key=self.valves.exa_api_key)
+
             response = await asyncio.to_thread(
                 exa.search,
                 query=query,
                 objective=objective,
+                category=category,
                 include_domains=include_domains,
                 exclude_domains=exclude_domains,
                 type=search_type,
                 contents=contents,
                 num_results=num_results,
-                user_identifier=user_id,
+                user_identifier=user_identifier,
                 start_published_date=start_published_date,
                 end_published_date=end_published_date,
                 betas=[DYNAMIC_HIGHLIGHTS_BETA],
             )
+
+            processed_results = []
+            for r in response.results:
+                highlights_text = (
+                    "\n".join(r.highlights) if r.highlights else ""
+                )
+                item = {
+                    "title": r.title,
+                    "url": r.url,
+                    "published_date": r.published_date,
+                    "highlights": highlights_text,
+                }
+                if getattr(r, "entities", None) and category in ["company", "people"]:
+                    item["entities"] = [asdict(e) for e in r.entities]
+                processed_results.append(item)
+
+            await emit_status(f"Found {len(processed_results)} results.", done=True)
+
+            output = {
+                "type": "exa_search_results",
+                "search_query": query,
+                "search_results": processed_results,
+            }
+
+            return json.dumps(output, ensure_ascii=False)
+
         except Exception as e:
             await emit_status(f"Exa search failed: {e}", done=True)
             return json.dumps({"error": f"Exa search failed: {str(e)}"})
-
-
-
-        processed_results = []
-        for r in response.results:
-            item = {
-                "title": r.title,
-                "url": r.url,
-                "published_date": r.published_date,
-                "highlights": "".join(r.highlights),
-            }
-            if getattr(r, "entities", None) and category in ["company", "people"]:
-                item["entities"] = [asdict(e) for e in r.entities]
-            processed_results.append(item)
-        
-        output = {
-            "type": "exa_search_results",
-            "search_query": query,
-            "search_results": processed_results
-        }
-
-        return json.dumps(output, ensure_ascii=False)
