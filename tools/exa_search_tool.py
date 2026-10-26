@@ -59,11 +59,17 @@ class Tools:
         outside those hard constraints would be unusable. Express soft source or
         recency preferences in ``query`` and ``objective`` instead.
 
-        :param query: Natural-language description of the ideal webpage, not a list
-                of keywords (e.g., "technical blog post comparing hybrid and semantic RAG
-                retrieval", not "hybrid vs semantic RAG"). Include the subject, source
-                type, and time period when relevant. Do not use ``site:`` operators; use
-                ``include_domains`` or ``exclude_domains`` instead.
+        :param query: A full, descriptive natural-language sentence or phrase
+                modeling the ideal webpage text or title (for example, "In-depth
+                comparison of Exa and Google Search for enterprise research workflows").
+
+                Strict prohibitions: no Boolean logic, no search syntax, and no
+                keyword soup. Avoid "AND", "OR", "NOT", parentheses, quoted
+                phrases, and operators like "site:", "-site:", "filetype:", or
+                "inurl:"; use ``include_domains`` or ``exclude_domains`` instead.
+                Use a natural-language sentence, not a comma-separated tag list.
+                If comparing alternatives, write a comparative query or make
+                separate tool calls.
         :param objective: Goal for this search. Specify which documents should rank
                 first, which to exclude, and which facts or figures to extract.
         :param category: Optional specialized search index. Leave unset for general
